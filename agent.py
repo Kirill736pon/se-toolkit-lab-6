@@ -32,6 +32,30 @@ class Settings(BaseSettings):
     llm_model: str
 
 
+class DockerSettings(BaseSettings):
+    """Docker environment configuration from .env.docker.secret."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env.docker.secret",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    lms_api_key: str = ""
+
+
+class AgentSettings(BaseSettings):
+    """Agent-specific environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env.agent.secret",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    agent_api_base_url: str = "http://localhost:42002"
+
+
 # =============================================================================
 # Tool definitions
 # =============================================================================
@@ -115,6 +139,75 @@ def list_files(path: str) -> str:
         return f"Error: Could not list directory - {e}"
 
 
+def query_api(
+    method: str,
+    path: str,
+    body: str | None = None,
+    lms_api_key: str = "",
+    api_base_url: str = "http://localhost:42002",
+) -> str:
+    """
+    Query the backend API.
+
+    Args:
+        method: HTTP method (GET, POST, PUT, DELETE, etc.)
+        path: API endpoint path (e.g., '/items/', '/analytics/')
+        body: Optional JSON request body for POST/PUT requests
+        lms_api_key: API key for authentication (from LMS_API_KEY env var)
+        api_base_url: Base URL of the backend API
+
+    Returns:
+        JSON string with status_code and body, or error message.
+    """
+    import httpx
+
+    # Validate method
+    valid_methods = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+    if method.upper() not in valid_methods:
+        return f'Error: Invalid HTTP method "{method}". Valid methods: {", ".join(valid_methods)}'
+
+    # Build URL
+    base_url = api_base_url.rstrip("/")
+    url = f"{base_url}{path}"
+
+    # Prepare headers
+    headers = {}
+    if lms_api_key:
+        headers["Authorization"] = f"Bearer {lms_api_key}"
+
+    # Prepare request body
+    json_body = None
+    if body:
+        try:
+            json_body = json.loads(body)
+        except json.JSONDecodeError as e:
+            return f"Error: Invalid JSON body - {e}"
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.request(
+                method=method.upper(),
+                url=url,
+                headers=headers,
+                json=json_body,
+            )
+
+            result = {
+                "status_code": response.status_code,
+                "body": response.json() if response.content else None,
+            }
+            return json.dumps(result)
+
+    except httpx.TimeoutException:
+        return f"Error: Request to {url} timed out (30s limit)"
+    except httpx.HTTPStatusError as e:
+        return f"Error: HTTP {e.response.status_code} - {e.response.text[:200]}"
+    except httpx.RequestError as e:
+        return f"Error: Network error - {e}"
+    except Exception as e:
+        return f"Error: Unexpected error - {e}"
+
+
 # Tool schemas for LLM function calling
 TOOLS = [
     {
@@ -145,29 +238,60 @@ TOOLS = [
             "required": ["path"],
         },
     },
+    {
+        "name": "query_api",
+        "description": "Query the backend API to get data from the database (items, submissions, analytics, etc.)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "method": {
+                    "type": "string",
+                    "description": "HTTP method (GET, POST, PUT, DELETE)",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "API endpoint path (e.g., '/items/', '/analytics/completion-rate')",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Optional JSON request body for POST/PUT requests",
+                },
+            },
+            "required": ["method", "path"],
+        },
+    },
 ]
 
 # System prompt for the documentation agent
-SYSTEM_PROMPT = """You are a documentation assistant. You have access to two tools:
+SYSTEM_PROMPT = """You are a documentation and system assistant. You have access to three tools:
 - list_files: List files in a directory
 - read_file: Read a file's contents
+- query_api: Query the backend API to get data from the database
 
 To answer questions:
-1. First explore the wiki structure with list_files if needed
-2. Read relevant files with read_file to find the answer
-3. Answer the question and include a source reference in the format: "wiki/file.md#section-anchor"
+1. For wiki/documentation questions → use list_files and read_file
+2. For system facts (framework, ports, code structure) → use read_file on source code
+3. For data queries (item count, scores, analytics, submissions) → use query_api with GET/POST
 
-Always include the source reference in your answer. The source should be the file path and section anchor that contains the answer.
+Always include the source reference in your answer when using wiki files (format: "wiki/file.md#section-anchor").
+For API queries, mention the endpoint used in your answer.
 """
 
 
-def execute_tool(tool_name: str, args: dict[str, Any]) -> str:
+def execute_tool(
+    tool_name: str,
+    args: dict[str, Any],
+    lms_api_key: str = "",
+    api_base_url: str = "http://localhost:42002",
+) -> str:
     """
     Execute a tool call and return the result.
 
     Args:
         tool_name: Name of the tool to execute.
         args: Arguments for the tool.
+        lms_api_key: API key for query_api authentication.
+        api_base_url: Base URL for query_api.
 
     Returns:
         Tool result as string.
@@ -178,6 +302,17 @@ def execute_tool(tool_name: str, args: dict[str, Any]) -> str:
     elif tool_name == "list_files":
         path = args.get("path", "")
         return list_files(path)
+    elif tool_name == "query_api":
+        method = args.get("method", "GET")
+        path = args.get("path", "")
+        body = args.get("body")
+        return query_api(
+            method=method,
+            path=path,
+            body=body,
+            lms_api_key=lms_api_key,
+            api_base_url=api_base_url,
+        )
     else:
         return f"Error: Unknown tool '{tool_name}'"
 
@@ -196,7 +331,12 @@ def extract_source_from_answer(answer: str) -> str:
     return ""
 
 
-def call_llm_with_tools(question: str, settings: Settings) -> dict[str, Any]:
+def call_llm_with_tools(
+    question: str,
+    settings: Settings,
+    docker_settings: DockerSettings,
+    agent_settings: AgentSettings,
+) -> dict[str, Any]:
     """
     Send a question to the LLM and execute tool calls in a loop.
 
@@ -279,7 +419,12 @@ def call_llm_with_tools(question: str, settings: Settings) -> dict[str, Any]:
                 print(f"Executing tool: {tool_name}({tool_args})", file=sys.stderr)
 
                 # Execute the tool
-                result = execute_tool(tool_name, tool_args)
+                result = execute_tool(
+                    tool_name,
+                    tool_args,
+                    lms_api_key=docker_settings.lms_api_key,
+                    api_base_url=agent_settings.agent_api_base_url,
+                )
 
                 # Log for output
                 tool_calls_log.append({
@@ -340,12 +485,16 @@ def main() -> int:
         return 1
 
     try:
-        # Load settings
+        # Load settings from all config files
         settings = Settings()  # type: ignore[call-arg]
+        docker_settings = DockerSettings()  # type: ignore[call-arg]
+        agent_settings = AgentSettings()  # type: ignore[call-arg]
         print(f"Loaded LLM configuration", file=sys.stderr)
+        print(f"Loaded LMS API key: {'yes' if docker_settings.lms_api_key else 'no'}", file=sys.stderr)
+        print(f"Loaded API base URL: {agent_settings.agent_api_base_url}", file=sys.stderr)
 
         # Call LLM with tools
-        result = call_llm_with_tools(question, settings)
+        result = call_llm_with_tools(question, settings, docker_settings, agent_settings)
 
         # Output valid JSON to stdout
         print(json.dumps(result))

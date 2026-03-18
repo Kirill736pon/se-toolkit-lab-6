@@ -43,3 +43,77 @@ def test_agent_output_format():
 
     assert "tool_calls" in output, "Missing 'tool_calls' field in output"
     assert isinstance(output["tool_calls"], list), "'tool_calls' must be a list"
+
+
+def test_read_file_tool_usage():
+    """
+    Test that agent uses read_file tool for wiki questions.
+
+    Question: "How do you resolve a merge conflict?"
+    Expected:
+    - read_file in tool_calls
+    - wiki/git-vscode.md or wiki/git.md in source field (contains merge conflict info)
+    """
+    result = subprocess.run(
+        [sys.executable, "agent.py", "How do you resolve a merge conflict?"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with error: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"Agent output is not valid JSON: {result.stdout}") from e
+
+    # Check required fields exist
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "source" in output, "Missing 'source' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+
+    # Verify read_file was used
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "read_file" in tool_names, "Expected 'read_file' in tool_calls"
+
+    # Verify source contains wiki/git-vscode.md or wiki/git.md
+    source = output["source"]
+    assert "wiki/git-vscode.md" in source or "wiki/git.md" in source, (
+        f"Expected 'wiki/git-vscode.md' or 'wiki/git.md' in source, got: {source}"
+    )
+
+
+def test_list_files_tool_usage():
+    """
+    Test that agent uses list_files tool for directory listing questions.
+
+    Question: "What files are in the wiki?"
+    Expected:
+    - list_files in tool_calls
+    """
+    result = subprocess.run(
+        [sys.executable, "agent.py", "What files are in the wiki?"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with error: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"Agent output is not valid JSON: {result.stdout}") from e
+
+    # Check required fields exist
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+
+    # Verify list_files was used
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "list_files" in tool_names, "Expected 'list_files' in tool_calls"

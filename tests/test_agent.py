@@ -117,3 +117,74 @@ def test_list_files_tool_usage():
     # Verify list_files was used
     tool_names = [tc.get("tool") for tc in output["tool_calls"]]
     assert "list_files" in tool_names, "Expected 'list_files' in tool_calls"
+
+
+def test_query_api_tool_usage_for_data():
+    """
+    Test that agent uses query_api tool for data-dependent questions.
+
+    Question: "How many items are in the database?"
+    Expected:
+    - query_api in tool_calls with GET /items/ or similar endpoint
+    """
+    result = subprocess.run(
+        [sys.executable, "agent.py", "How many items are in the database?"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with error: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"Agent output is not valid JSON: {result.stdout}") from e
+
+    # Check required fields exist
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+
+    # Verify query_api was used
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "query_api" in tool_names, "Expected 'query_api' in tool_calls"
+
+
+def test_read_file_for_system_facts():
+    """
+    Test that agent uses read_file tool for static system fact questions.
+
+    Question: "What Python web framework does this project use?"
+    Expected:
+    - read_file in tool_calls (reads backend source code or requirements)
+    - Answer should mention FastAPI or the framework name
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "agent.py",
+            "What Python web framework does this project use?",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with error: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"Agent output is not valid JSON: {result.stdout}") from e
+
+    # Check required fields exist
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+
+    # Verify read_file was used (agent should read backend code or requirements)
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "read_file" in tool_names, "Expected 'read_file' in tool_calls"
